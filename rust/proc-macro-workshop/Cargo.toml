@@ -1,0 +1,19 @@
+[package]
+name = "proc-macro-workshop"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[[bin]]
+name = "workshop"
+path = "main.rs"
+
+[dependencies]
+derive_builder = { path = "builder" }
+
+# bitfield = { path = "bitfield" }
+# derive_debug = { path = "debug" }
+# seq = { path = "seq" }
+# sorted = { path = "sorted" }
