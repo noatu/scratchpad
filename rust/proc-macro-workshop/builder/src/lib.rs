@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{ToTokens, format_ident, quote};
+use proc_macro2::Span;
+use quote::{format_ident, quote};
 use syn::{
     Data, DeriveInput, Error, Expr, Field, Fields, GenericArgument, Ident, Lit, PathArguments,
     Result, Type,
@@ -17,12 +17,7 @@ struct Builder {
 
 impl Parse for Builder {
     fn parse(input: ParseStream) -> Result<Self> {
-        Self::parse(DeriveInput::parse(input)?)
-    }
-}
-
-impl Builder {
-    fn parse(input: DeriveInput) -> Result<Self> {
+        let input = DeriveInput::parse(input)?;
         let span = input.span();
 
         let Data::Struct(data_struct) = input.data else {
@@ -43,86 +38,6 @@ impl Builder {
             origin_ident: input.ident,
             fields,
         })
-    }
-}
-
-impl ToTokens for Builder {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        let Self {
-            ident,
-            origin_ident,
-            fields,
-        } = self;
-
-        let builder_body = fields
-            .iter()
-            .map(|BuilderField { ident, ty, kind }| match kind {
-                FieldKind::Required | FieldKind::Option => {
-                    quote!(#ident: ::std::option::Option<#ty>)
-                }
-                FieldKind::Vec(_) => quote!(#ident: ::std::vec::Vec<#ty>),
-            });
-
-        let builder_functions = fields
-            .iter()
-            .map(|BuilderField { ident, ty, kind }| match kind {
-                FieldKind::Required | FieldKind::Option => quote! {
-                   pub fn #ident (&mut self, #ident: #ty) -> &mut Self {
-                       self.#ident = ::std::option::Option::Some(#ident);
-                       self
-                   }
-                },
-                FieldKind::Vec(each) => {
-                    let mut q = quote! {
-                    pub fn #ident (&mut self, #ident: ::std::vec::Vec<#ty>) -> &mut Self {
-                        self.#ident = #ident;
-                        self
-                    }};
-
-                    if each != ident {
-                        q.extend(quote! {
-                           pub fn #each (&mut self, #ident: #ty) -> &mut Self {
-                               self.#ident.push(#ident);
-                               self
-                           }
-                        });
-                    }
-                    q
-                }
-            });
-
-        let constructor_fields = fields.iter().map(|BuilderField { ident, kind, .. }| {
-            let err = format!("field '{ident}' is not set!");
-            match kind {
-                FieldKind::Option | FieldKind::Vec(_) => quote!(#ident: self.#ident.clone()),
-                FieldKind::Required => {
-                    quote!(#ident: self.#ident.clone().ok_or(#err)?)
-                }
-            }
-        });
-
-        tokens.extend(quote! {
-            #[derive(::std::default::Default)]
-            pub struct #ident {
-               #(#builder_body,)*
-            }
-
-            impl #ident {
-               #(#builder_functions)*
-
-                pub fn build(&mut self) -> ::std::result::Result<#origin_ident, ::std::boxed::Box<dyn ::std::error::Error>> {
-                    ::std::result::Result::Ok(#origin_ident {
-                        #(#constructor_fields,)*
-                    })
-                }
-            }
-
-            impl #origin_ident {
-                pub fn builder() -> #ident {
-                    <#ident as ::std::default::Default>::default()
-                 }
-            }
-        });
     }
 }
 
@@ -203,6 +118,76 @@ enum FieldKind {
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
-    let builder = parse_macro_input!(input as Builder);
-    quote!(#builder).into()
+    let Builder {
+        ident,
+        origin_ident,
+        fields,
+    } = parse_macro_input!(input as Builder);
+
+    let builder_body = fields
+        .iter()
+        .map(|BuilderField { ident, ty, kind }| match kind {
+            FieldKind::Required | FieldKind::Option => quote! {
+                #ident: ::std::option::Option<#ty>
+            },
+            FieldKind::Vec(_) => quote!(#ident: ::std::vec::Vec<#ty>),
+        });
+
+    let builder_functions = fields
+        .iter()
+        .map(|BuilderField { ident, ty, kind }| match kind {
+            FieldKind::Required | FieldKind::Option => quote! {
+                pub fn #ident (&mut self, #ident: #ty) -> &mut Self {
+                    self.#ident = ::std::option::Option::Some(#ident);
+                    self
+                }
+            },
+            FieldKind::Vec(each) if each != ident => quote! {
+                pub fn #each (&mut self, #ident: #ty) -> &mut Self {
+                    self.#ident.push(#ident);
+                    self
+                }
+                pub fn #ident (&mut self, #ident: ::std::vec::Vec<#ty>) -> &mut Self {
+                    self.#ident = #ident;
+                    self
+                }
+            },
+            FieldKind::Vec(_) => quote! {
+                pub fn #ident (&mut self, #ident: ::std::vec::Vec<#ty>) -> &mut Self {
+                    self.#ident = #ident;
+                    self
+                }
+            },
+        });
+
+    let constructor_fields = fields.iter().map(|BuilderField { ident, kind, .. }| {
+        let err = format!("field '{ident}' is not set!");
+        match kind {
+            FieldKind::Option | FieldKind::Vec(_) => quote!(#ident: self.#ident.clone()),
+            FieldKind::Required => quote!(#ident: self.#ident.clone().ok_or(#err)?),
+        }
+    });
+
+    quote! {
+        #[derive(::std::default::Default)]
+        pub struct #ident {
+           #( #builder_body, )*
+        }
+
+        impl #ident {
+            #( #builder_functions )*
+
+            pub fn build(&mut self) -> ::std::result::Result<#origin_ident, ::std::boxed::Box<dyn ::std::error::Error>> {
+                ::std::result::Result::Ok(#origin_ident {
+                    #( #constructor_fields, )*
+                })
+            }
+        }
+
+        impl #origin_ident {
+            pub fn builder() -> #ident {
+                <#ident as ::std::default::Default>::default()
+             }
+        }
+    }.into()
 }
