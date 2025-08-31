@@ -12,8 +12,8 @@ path = "main.rs"
 
 [dependencies]
 derive_builder = { path = "builder" }
+seq = { path = "seq" }
 
 # bitfield = { path = "bitfield" }
 # derive_debug = { path = "debug" }
-# seq = { path = "seq" }
 # sorted = { path = "sorted" }
