@@ -1,133 +1,96 @@
-use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
+use std::iter::Peekable;
 
+use proc_macro::{
+    Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree,
+    token_stream::IntoIter,
+};
+
+/// An Intermediate Representation of the macro input
 struct SeqIR {
     start: usize,
     end: usize,
-    tree: Vec<SeqTree>,
+    tree: Vec<SeqTree>, // like a TokenStream
 }
 
+/// Maps a `TokenTree` to a more friendly structure for replacing and repetition
 enum SeqTree {
-    Group(GroupTree),
-    Repeat(RepeatTree),
-    Replace(ReplaceToken),
+    Group {
+        span: Span,
+        delimiter: Delimiter,
+        tree: Vec<SeqTree>,
+    },
+    Repeat {
+        separator: Vec<TokenTree>,
+        tree: Vec<SeqTree>,
+    },
+    Replace {
+        span: Span,
+        prefix: Option<String>,
+        suffix: Option<String>,
+    },
     Other(TokenTree),
-}
-struct GroupTree {
-    span: Span,
-    delimiter: Delimiter,
-    tree: Vec<SeqTree>,
-}
-struct RepeatTree {
-    separator: Vec<TokenTree>,
-    tree: Vec<SeqTree>,
-}
-struct ReplaceToken {
-    span: Span,
-    prefix: Option<String>,
-    suffix: Option<String>,
 }
 
 impl TryFrom<TokenStream> for SeqIR {
     type Error = TokenStream;
 
     fn try_from(value: TokenStream) -> Result<Self, Self::Error> {
-        let mut iter = value.into_iter();
-        let mut last_span = Span::call_site();
+        let mut parser = Parser::new(value);
 
-        let next = iter.next();
-        let var = if let Some(TokenTree::Ident(ident)) = &next {
-            last_span = ident.span();
-            ident.to_string()
-        } else {
-            return Err(error(
-                "Expected an identifier!",
-                next.map_or(last_span, |t| t.span()),
-            ));
-        };
+        let var = parser.parse(
+            |tt| match tt {
+                TokenTree::Ident(i) => Ok(i.to_string()),
+                _ => Err(()),
+            },
+            "Expected an identifier!",
+        )?;
 
-        let next = iter.next();
-        if let Some(TokenTree::Ident(ident)) = &next
-            && ident.to_string() == "in"
-        {
-            last_span = ident.span();
-        } else {
-            return Err(error(
-                "Expected the `in` keyword!",
-                next.map_or_else(|| last_span.end(), |t| t.span()),
-            ));
-        }
+        parser.parse(
+            |tt| match tt {
+                TokenTree::Ident(i) if i.to_string() == "in" => Ok(()),
+                _ => Err(()),
+            },
+            "Expected the `in` keyword!",
+        )?;
 
-        let next = iter.next();
-        let start = if let Some(TokenTree::Literal(lit)) = &next
-            && let Ok(x) = lit.to_string().parse::<usize>()
-        {
-            last_span = lit.span();
-            x
-        } else {
-            return Err(error(
-                "Expected a usize (range start)!",
-                next.map_or_else(|| last_span.end(), |t| t.span()),
-            ));
-        };
-
+        let start = parser.parse(
+            |tt| tt.to_string().parse::<usize>(),
+            "Expected a usize (range start)!",
+        )?;
         for _ in 0..2 {
-            let next = iter.next();
-            if let Some(TokenTree::Punct(punct)) = &next
-                && punct.as_char() == '.'
-            {
-                last_span = punct.span();
-            } else {
-                return Err(error(
-                    "Expected `..`!",
-                    next.map_or_else(|| last_span.end(), |t| t.span()),
-                ));
-            }
+            parser.parse(
+                |tt| match tt {
+                    TokenTree::Punct(p) if p.as_char() == '.' => Ok(()),
+                    _ => Err(()),
+                },
+                "Expected `..`!",
+            )?;
         }
+        let end = parser
+            .try_parse(|tt| match tt {
+                TokenTree::Punct(p) if p.as_char() == '=' => Some(1),
+                _ => None,
+            })
+            .unwrap_or(0)
+            + parser.parse(
+                |tt| tt.to_string().parse::<usize>(),
+                "Expected a usize (range end)!",
+            )?;
 
-        let mut next = iter.next();
-        let mut end = 0;
+        let block = parser.parse(
+            |tt| match tt {
+                TokenTree::Group(g) => Ok(g.stream()),
+                _ => Err(()),
+            },
+            "Expected a code block!",
+        )?;
 
-        if let Some(TokenTree::Punct(punct)) = &next
-            && punct.as_char() == '='
-        {
-            last_span = punct.span();
-            next = iter.next();
-            end += 1;
-        }
-
-        if let Some(TokenTree::Literal(lit)) = &next
-            && let Ok(x) = lit.to_string().parse::<usize>()
-        {
-            last_span = lit.span();
-            end += x;
-        } else {
-            return Err(error(
-                &format!("Expected a usize, got {next:#?}!"), // FIXME
-                next.map_or_else(|| last_span.end(), |t| t.span()),
-            ));
-        }
-
-        let next = iter.next();
-
-        let block = if let Some(TokenTree::Group(group)) = &next
-            && group.delimiter() == Delimiter::Brace
-        {
-            group.stream()
-        } else {
-            return Err(error(
-                "Expected a code block!",
-                next.map_or_else(|| last_span.end(), |t| t.span()),
-            ));
-        };
-
-        let other: TokenStream = iter.map(|t| error("Unexpected token!", t.span())).collect();
-        if !other.is_empty() {
-            return Err(other);
-        }
+        parser.end()?;
 
         Ok(Self {
             start,
             end,
+            // Parse only after checking for leftover tokens
             tree: SeqTree::parse(block, &var),
         })
     }
@@ -141,67 +104,67 @@ impl SeqTree {
         while let Some(token) = iter.next() {
             match token {
                 TokenTree::Ident(ident) if ident.to_string() == replace => {
-                    tree.push(Self::Replace(ReplaceToken {
+                    tree.push(Self::Replace {
                         span: ident.span(),
                         prefix: None,
                         suffix: None,
-                    }));
+                    });
                 }
 
+                // Handle the `prefix~Replace~suffix` syntax
                 TokenTree::Punct(p) if p.as_char() == '~' => match (tree.last_mut(), iter.peek()) {
-                    (
+                    ( // prefix~Replace
                         Some(Self::Other(TokenTree::Ident(prefix))),
                         Some(TokenTree::Ident(ident)),
                     ) if ident.to_string() == replace => {
-                        *tree.last_mut().unwrap() = Self::Replace(ReplaceToken {
+                        *tree.last_mut().unwrap() = Self::Replace {
                             span: prefix.span(),
                             prefix: Some(prefix.to_string()),
                             suffix: None,
-                        });
+                        };
                         iter.next();
                     }
-                    (
-                        Some(Self::Replace(ReplaceToken { suffix, .. })),
-                        Some(TokenTree::Ident(sfx)),
-                    ) if sfx.to_string() != replace => {
+                    // Replace~suffix
+                    (Some(Self::Replace { suffix, .. }), Some(sfx))
+                        // Cannot handle a Replace~Replace
+                        if sfx.to_string() != replace =>
+                    {
                         suffix.replace(sfx.to_string());
                         iter.next();
                     }
                     _ => tree.push(Self::Other(p.into())),
                 },
 
-                TokenTree::Group(g) => tree.push(Self::Group(GroupTree {
-                    span: g.span(),
-                    delimiter: g.delimiter(),
-                    tree: Self::parse(g.stream(), replace),
-                })),
-
+                // Handle the repetition syntax
                 TokenTree::Punct(p) if p.as_char() == '#' => {
                     if let Some(TokenTree::Group(group)) = iter.peek()
                         && group.delimiter() == Delimiter::Parenthesis
                     {
                         let token_stream = group.stream();
-                        let mut separator = Vec::new();
+                        iter.next(); // skip the group
 
-                        iter.next(); // group
+                        let separator = iter
+                            .by_ref()
+                            .take_while(
+                                // fill the separator till '*' is found and consumed
+                                |tt| !matches!(tt, TokenTree::Punct(p) if p.as_char() == '*'),
+                            )
+                            .collect();
 
-                        for t in iter.by_ref() {
-                            if let TokenTree::Punct(p) = &t
-                                && p.as_char() == '*'
-                            {
-                                break;
-                            }
-                            separator.push(t);
-                        }
-
-                        tree.push(Self::Repeat(RepeatTree {
+                        tree.push(Self::Repeat {
                             separator,
                             tree: Self::parse(token_stream, replace),
-                        }));
+                        });
                     } else {
                         tree.push(Self::Other(p.into()));
                     }
                 }
+
+                TokenTree::Group(g) => tree.push(Self::Group {
+                    span: g.span(),
+                    delimiter: g.delimiter(),
+                    tree: Self::parse(g.stream(), replace),
+                }),
 
                 other => tree.push(Self::Other(other)),
             }
@@ -211,119 +174,134 @@ impl SeqTree {
     }
 
     fn to_token_stream(&self, start: usize, end: usize, i: usize) -> TokenStream {
-        let mut token_stream = TokenStream::new();
-
         match self {
-            Self::Group(x) => token_stream.extend([x.to_token_tree(start, end, i)]),
-            Self::Repeat(x) => token_stream.extend(x.to_token_stream(start, end)),
-            Self::Replace(x) => token_stream.extend([x.to_token_tree(i)]),
-            Self::Other(x) => token_stream.extend([x.clone()]),
-        }
+            Self::Group {
+                span,
+                delimiter,
+                tree,
+            } => {
+                let mut group = Group::new(
+                    *delimiter,
+                    tree.iter()
+                        .map(|st| st.to_token_stream(start, end, i))
+                        .collect(),
+                );
+                group.set_span(*span);
+                TokenTree::Group(group).into()
+            }
 
-        token_stream
+            Self::Repeat { separator, tree } => {
+                let mut token_stream = TokenStream::new();
+                if start >= end {
+                    return token_stream;
+                }
+
+                token_stream.extend(tree.iter().map(|st| st.to_token_stream(start, end, start)));
+                if start + 1 == end {
+                    return token_stream;
+                }
+                for i in (start + 1)..end {
+                    token_stream.extend(separator.clone());
+                    token_stream.extend(tree.iter().map(|st| st.to_token_stream(start, end, i)));
+                }
+
+                token_stream
+            }
+
+            Self::Replace {
+                span,
+                prefix,
+                suffix,
+            } => {
+                // Ident cannot start with a number
+                if prefix.is_none() {
+                    return TokenTree::Literal(Literal::usize_unsuffixed(i)).into();
+                }
+                TokenTree::Ident(Ident::new(
+                    &format!(
+                        "{}{i}{}",
+                        prefix.as_ref().map_or("", |v| v),
+                        suffix.as_ref().map_or("", |v| v),
+                    ),
+                    *span,
+                ))
+                .into()
+            }
+
+            Self::Other(x) => x.clone().into(),
+        }
+    }
+
+    /// Check if there is a Replace token that is not in a Repeat token
+    fn bare_replace(&self) -> bool {
+        match self {
+            Self::Group { tree, .. } if tree.iter().any(Self::bare_replace) => true,
+            Self::Replace { .. } => true,
+            _ => false,
+        }
+    }
+    /// Check if there is a nested Repeat token
+    fn nested_repeat(&self) -> bool {
+        match self {
+            Self::Group { tree, .. } if tree.iter().any(Self::nested_repeat) => true,
+            Self::Repeat { .. } => true,
+            _ => false,
+        }
     }
 }
 
 impl From<SeqIR> for TokenStream {
     fn from(val: SeqIR) -> Self {
         let SeqIR { start, end, tree } = val;
-        let group = GroupTree {
-            span: Span::call_site(),
-            delimiter: Delimiter::None,
-            tree,
-        };
 
-        if !group.naked_replace() && group.partial_repeat() {
-            return group.to_token_tree(start, end, 0).into();
+        // Without bare Replace tokens and with a nested Repeat the tree itself does not need repetition
+        if !tree.iter().any(SeqTree::bare_replace) && tree.iter().any(SeqTree::nested_repeat) {
+            return tree
+                .iter()
+                .map(|st| st.to_token_stream(start, end, 0))
+                .collect();
         }
 
-        RepeatTree {
-            separator: Vec::new(),
-            tree: group.tree,
-        }
-        .to_token_stream(start, end)
+        // There is either a bare Replace token or no nested Repeats, meaning the tree itself is Repeat
+        (start..end)
+            .flat_map(|i| tree.iter().map(move |st| st.to_token_stream(start, end, i)))
+            .collect()
     }
 }
 
-impl GroupTree {
-    fn naked_replace(&self) -> bool {
-        for token in &self.tree {
-            match token {
-                SeqTree::Group(t) if t.naked_replace() => return true,
-                SeqTree::Replace(_) => return true,
-                _ => (),
-            }
-        }
-        false
-    }
-    fn partial_repeat(&self) -> bool {
-        for token in &self.tree {
-            match token {
-                SeqTree::Group(t) if t.partial_repeat() => return true,
-                SeqTree::Repeat(_) => return true,
-                _ => (),
-            }
-        }
-        false
-    }
-
-    fn to_token_tree(&self, start: usize, end: usize, i: usize) -> TokenTree {
-        let mut token_stream = TokenStream::new();
-
-        for token in &self.tree {
-            token_stream.extend(token.to_token_stream(start, end, i));
-        }
-
-        let mut group = Group::new(self.delimiter, token_stream);
-        group.set_span(self.span);
-        TokenTree::Group(group)
-    }
-}
-
-impl RepeatTree {
-    fn to_token_stream(&self, start: usize, end: usize) -> TokenStream {
-        let mut token_stream = TokenStream::new();
-
-        if start >= end {
-            return token_stream;
-        }
-
-        for token in &self.tree {
-            token_stream.extend(token.to_token_stream(start, end, start));
-        }
-
-        if start + 1 == end {
-            return token_stream;
-        }
-
-        for i in (start + 1)..end {
-            token_stream.extend(self.separator.clone());
-            for token in &self.tree {
-                token_stream.extend(token.to_token_stream(start, end, i));
-            }
-        }
-
-        token_stream
-    }
-}
-
-impl ReplaceToken {
-    fn to_token_tree(&self, val: usize) -> TokenTree {
-        if self.prefix.is_none() && self.suffix.is_none() {
-            return TokenTree::Literal(Literal::usize_unsuffixed(val));
-        }
-
-        TokenTree::Ident(Ident::new(
-            &format!(
-                "{}{val}{}",
-                self.prefix.as_ref().map_or("", |v| v),
-                self.suffix.as_ref().map_or("", |v| v),
-            ),
-            self.span,
-        ))
-    }
-}
-
+/// Repeats code inside the block. Example usage:
+/// ```
+/// use seq::seq;
+///
+/// seq!(N in 0..4 {
+///     enum Enum~N { #( Variant~N~42, )* }
+/// });
+///
+/// // hiiii
+/// seq!(_ in 0..1 {
+///     println!("hiiii");
+/// });
+/// // hiiiii
+/// seq!(_ in 1..=5 {
+///     println!(concat!("h" #(,"i")*));
+/// });
+/// // hiiiii
+/// seq!(_ in 0..4 {
+///     println!(concat!("h", #("i"),*, "i"));
+/// });
+/// // 1: hiiiii
+/// // ...
+/// // 5: hiiiii
+/// seq!(N in 1..=5 {
+///     println!(concat!(N, ": h"));
+/// });
+/// // hiiiii1
+/// // ...
+/// // hiiiii5
+/// seq!(N in 1..=5 {
+///     println!(concat!("h", #("i",)* N));
+/// });
+/// ```
 #[proc_macro]
 pub fn seq(input: TokenStream) -> TokenStream {
     match SeqIR::try_from(input) {
@@ -332,6 +310,55 @@ pub fn seq(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Interface to parse a `TokenStream` via closures. With error reporting.
+struct Parser {
+    prev_span: Span,
+    iter: Peekable<IntoIter>,
+}
+
+impl Parser {
+    fn new(token_stream: TokenStream) -> Self {
+        Self {
+            prev_span: Span::call_site(),
+            iter: token_stream.into_iter().peekable(),
+        }
+    }
+
+    /// Consume next `TokenTree`, drops `func` error value mapping it to `err`
+    fn parse<F, T, E>(&mut self, func: F, err: &str) -> Result<T, TokenStream>
+    where
+        F: Fn(TokenTree) -> Result<T, E>,
+    {
+        let tt = self.iter.next().ok_or_else(|| error(err, self.prev_span))?;
+        self.prev_span = tt.span();
+        func(tt).map_err(|_| error(err, self.prev_span))
+    }
+
+    /// Advances the iter if `func` returns `Some`
+    fn try_parse<F, T>(&mut self, func: F) -> Option<T>
+    where
+        F: Fn(&TokenTree) -> Option<T>,
+    {
+        let tt = self.iter.peek()?;
+        if let Some(t) = func(tt) {
+            self.prev_span = tt.span();
+            self.iter.next();
+            return Some(t);
+        }
+        None
+    }
+
+    /// Errors if there are leftover tokens
+    fn end(self) -> Result<(), TokenStream> {
+        let other = self
+            .iter
+            .map(|tt| error("Unexpected token!", tt.span()))
+            .collect::<TokenStream>();
+        if other.is_empty() { Ok(()) } else { Err(other) }
+    }
+}
+
+/// Spanned `::core::compile_error! { message }`
 fn error(message: &str, span: Span) -> TokenStream {
     let (start, end) = (span.start(), span.end());
 
