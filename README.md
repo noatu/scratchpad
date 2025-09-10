@@ -10,10 +10,13 @@ In this repo, I will put stuff that I usually throw away or simply lose over tim
 
 # DOING
 - [Procedural Macros Workshop](https://github.com/dtolnay/proc-macro-workshop)
+- [The Rustonomicon](https://doc.rust-lang.org/nomicon)
 
 # TODO
-- Shower
-- Touch Grass
+- Sleep
+- Cleaning
+- [The Rust Reference](https://doc.rust-lang.org/reference/index.html)
 
 # DONE
+- [The Rust Programming Language](https://doc.rust-lang.org/stable/book/)
 - [MacroKata](https://github.com/tfpk/macrokata)

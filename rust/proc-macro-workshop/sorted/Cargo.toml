@@ -1,5 +1,5 @@
 [package]
-name = "derive_builder"
+name = "sorted"
 edition = "2024"
 publish = false
 
@@ -9,4 +9,4 @@ proc-macro = true
 [dependencies]
 quote = "1"
 proc-macro2 = "1"
-syn = { version = "2", features = ["full", "extra-traits"] }
+syn = { version = "2", features = ["full", "visit-mut"] }

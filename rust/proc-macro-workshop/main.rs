@@ -1,5 +1,6 @@
 use derive_builder::Builder;
 use seq::seq;
+use sorted::sorted;
 
 #[derive(Builder)]
 pub struct BuilderTest {
@@ -10,9 +11,11 @@ pub struct BuilderTest {
 }
 
 seq!(N in 0..4 {
-    enum Enum~N { #( Variant~N~42, )* }
+    #[sorted]
+    enum Enum { #( Variant~N~42, )* }
 });
 
+#[sorted::check]
 fn main() {
     let builder_test = BuilderTest::builder()
         .collect(4)
@@ -35,4 +38,12 @@ fn main() {
     seq!(N in 1..=5 {
         println!(concat!("h", #("i",)* N));
     });
+
+    #[sorted]
+    match Enum::Variant042 {
+        Enum::Variant042 => (),
+        Enum::Variant142 => (),
+        Enum::Variant242 => (),
+        Enum::Variant342 => (),
+    }
 }
